@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ratchet-guard"
+version = "0.1.0"
+description = "A metric-aware replacement for the greedy autoresearch ratchet"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "David Moore", email = "david@datamathcode.dev" }]
+dependencies = []
+
+[project.scripts]
+ratchet = "ratchet_guard.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ratchet_guard"]

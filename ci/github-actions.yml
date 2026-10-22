@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Set up Python
+        run: uv venv --python ${{ matrix.python-version }} .venv
+      - name: Install
+        run: uv pip install -e . --python .venv/bin/python
+      - name: Unit tests
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Demo runs and both judges disagree
+        run: .venv/bin/python examples/toy-metric-blindness/run_demo.py
+      - name: CLI smoke test
+        run: |
+          cd examples/toy-metric-blindness
+          R=../../.venv/bin/ratchet
+          S=$(mktemp -d)
+          $R --contract contract.toml --state "$S" init
+          $R --contract contract.toml --state "$S" baseline \
+            --cmd "python3 evaluate.py --model linear --split dev" \
+            --canonical-cmd "python3 evaluate.py --model linear --split sealed"
+          $R --contract contract.toml --state "$S" canary
+          $R --contract contract.toml --state "$S" trial --commit quadratic \
+            --family architecture --hypothesis "interaction term" \
+            --cmd "python3 evaluate.py --model quadratic --split dev"
+          $R --contract contract.toml --state "$S" verify

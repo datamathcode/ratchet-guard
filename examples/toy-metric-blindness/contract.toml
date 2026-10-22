@@ -1,0 +1,56 @@
+# The goal ledger. Everything the ratchet is allowed to believe is declared
+# here, hashed, and checked on every decision. If a claim cannot be stated as
+# a number or a command, it does not exist as far as the gate is concerned.
+
+goal = "Predict the label on data the search has never seen. Reported as accuracy on a sealed split drawn from the same distribution but excluded from every experiment."
+
+min_delta = 0.005          # smallest change worth believing, in metric units
+complexity_price = 0.0002 # metric units charged per line of code added
+seed_replicates = 3       # never quote a delta from fewer than three runs
+max_trials = 40
+max_unadjudicated = 2
+exploration_fraction = 0.15
+debt_repay_window = 6
+canary_every = 10
+variance_inflation_tolerance = 2.5
+families = ["architecture", "calibration", "regularisation"]
+
+# Numeric form of "VRAM is a soft constraint". A guard degradation above
+# `tolerance` rejects the trial regardless of how good the metric looks.
+[[guards]]
+name = "peak_mem_mb"
+direction = "min"
+tolerance = 0.25
+
+[metric]
+name = "dev_accuracy"
+direction = "max"
+unit = "accuracy"
+
+[adjudication]
+# The adjudicator the search cannot reach. Called only at promotion, and
+# only `holdout_budget` times in total.
+#
+# `{candidate}` is replaced with the trial's `--commit`. The placeholder is
+# mandatory: an adjudicator that does not depend on the candidate under review
+# is scoring a fixed model and would approve anything.
+holdout_cmd = "python3 evaluate.py --model {candidate} --split sealed"
+holdout_budget = 6
+
+# Reference mutants with known true quality. If the metric ranks one of these
+# wrongly, the metric is blind to that failure mode and may not judge alone.
+[[canaries]]
+name = "shuffle"
+command = "python3 evaluate.py --model shuffle --split dev"
+expectation = "worse"
+separation = 0.10
+covered_by = "holdout"
+failure_mode = "metric does not separate signal from noise"
+
+[[canaries]]
+name = "memorizer"
+command = "python3 evaluate.py --model memorizer --split dev"
+expectation = "worse"
+separation = 0.05
+covered_by = "holdout"
+failure_mode = "metric rewards memorising the evaluation split"
