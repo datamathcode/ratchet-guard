@@ -4,7 +4,7 @@
 
 goal = "Predict the label on data the search has never seen. Reported as accuracy on a sealed split drawn from the same distribution but excluded from every experiment."
 
-min_delta = 0.020          # ~2x the measured noise sd (see `ratchet control`)
+min_delta = 0.0275         # 2.8x the measured sd: history integrity over terminal bias
 complexity_price = 0.0002 # metric units charged per line of code added
 seed_replicates = 4       # 3 per arm cannot reach p=0.05 on any rank test
 max_trials = 40

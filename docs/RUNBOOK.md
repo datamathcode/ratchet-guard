@@ -63,8 +63,14 @@ How to read it:
 |---|---|
 | < 1.0 | the run refuses to start. A threshold under one sd cannot separate anything. |
 | 1.0 – 2.0 | accepting noise records; the log will be fiction |
-| 2.0 | ~92% one-sided on a single comparison — the usual choice |
-| 2.8 | ~97.5%; buys a cleaner history at the cost of terminal bias (see PITFALLS appendix) |
+| 2.0 | ~92% one-sided; least terminal bias, ~5 fictional commits per 100 |
+| **2.8** | **the default.** ~97.5%; fewest fictional commits, at ~3σ of terminal bias |
+
+The default is 2.8σ because this tool is for runs whose output someone else will
+believe. That choice buys an auditable history and pays in bias. If you would
+rather have a branch that sits closer to the truth and a log with more fiction
+in it, set 2.0σ — and write down that you did, because the next reader will
+otherwise assume the default.
 
 Then leave it alone. Every trial pools its own within-arm variance into the same
 estimate, so σ gets more accurate as the run proceeds for free.

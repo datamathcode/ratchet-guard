@@ -36,7 +36,7 @@ with no dependencies. Same candidates, same order, two judges:
 
 ```
 baseline   : surrogate=0.8885  goal=0.8625
-noise sd   : 0.0098  ->  min_delta is 2.0x sd
+noise sd   : 0.0098  ->  min_delta is 2.8x sd
 
 NAIVE RATCHET   accept <=> the surrogate improved
   memorizer      surrogate=1.0000  goal=0.5800  accept
@@ -61,9 +61,9 @@ Nothing malfunctioned. The ratchet did exactly what it was told.
 
 The candidate order is deliberate: the memoriser is tried **first**, because an
 agent reaching for a big win reaches for the cheap one. An agent that is honest
-about its own uncertainty would do that. `min_delta` in that contract is 2.0× the
-measured noise sd, which is why `linear_l2` is a noise rejection and not a
-"close enough".
+about its own uncertainty would do that. `min_delta` in that contract is 2.8× the
+measured noise sd — the default trade, chosen for history integrity — which is
+why `linear_l2` is a noise rejection and not a "close enough".
 
 ## Install
 
@@ -128,7 +128,7 @@ working branch. Only the canonical baseline requires the goal's consent.
 
 From `docs/PITFALLS.md`, in the order that makes the others interpretable:
 
-1. **No-op trials → σ.** Then `min_delta = 2σ`. Write down that it is a ratchet
+1. **No-op trials → σ.** Then `min_delta = 2.8σ`. Write down that it is a ratchet
    damper, not a significance test.
 2. **Baseline = mean of 3 runs, not one.**
 3. **Assert the unscored share of the wall clock is under a cap.** One line.

@@ -439,8 +439,13 @@ def cmd_control(args) -> int:
           f"+/-{rel_sd_of_sd(len(seeds)):.0%})")
     print()
     print(f"  min_delta 1.0x sd = {sd:.6f}   acceptances below this are noise records")
-    print(f"  min_delta 2.0x sd = {2 * sd:.6f}  ~92% one-sided (single comparison)")
-    print(f"  min_delta 2.8x sd = {2.8 * sd:.6f}  ~97.5% one-sided (ratchet damper)")
+    print(f"  min_delta 2.0x sd = {2 * sd:.6f}  ~92% one-sided; least terminal bias")
+    print(f"  min_delta 2.8x sd = {2.8 * sd:.6f}  <- recommended: fewest fictional commits")
+    print()
+    print(f"  The default trade is 2.8x sd, which buys history honesty (~0.3 false")
+    print(f"  accepts per 100) and pays ~3 sd of terminal bias. Use 2.0x sd if you")
+    print(f"  would rather have a less-biased branch and a dirtier log. Pick one and")
+    print(f"  say which in the run notes; do not split the difference.")
 
     if contract.min_delta < sd:
         print(f"\nWARNING: contract min_delta {contract.min_delta:.6f} is below 1 sd. "

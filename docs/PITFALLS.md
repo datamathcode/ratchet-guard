@@ -135,7 +135,7 @@ The ratchet accepts a `0.0003` improvement on a metric whose run-to-run spread i
 | 2.3σ | 95% | ~1 | ~2.6σ |
 | 2.8σ | 97.5% | ~0.3 | ~3.1σ |
 
-Two framings, two answers, and v1 never said which it was using. **For a single comparison**, 2.3σ is the 95% choice. **For the ratchet**, use 2.8σ — and understand that it damps one harm at the cost of another. See the appendix.
+Two framings, two answers, and v1 never said which it was using. **For a single comparison**, 2.3σ is the 95% choice. **For the ratchet**, use 2.8σ: that is a deliberate choice of history integrity over terminal bias, not a significance level. See the appendix for what it costs.
 
 ### P11. Two seeds cannot estimate a noise floor — **A** [D]
 
@@ -344,6 +344,10 @@ These are order-of-magnitude, from the record-process approximation, and they sh
 
 Pick one deliberately and write down which. Do not say "2.8σ, it damps the drift" — on these numbers it does not. The lever that reduces *both* harms is not a threshold at all; it is the three below.
 
+**Resolved, 2026-10-22.** The default recommendation in this repository is **2.8σ**, chosen for **history integrity over terminal bias**. The reasoning: terminal bias moves the branch to a worse place, but it is *measurable after the fact* by re-measuring the canonical baseline on a sealed split, and it is partly repaired by the same adjudication that catches a real regression. A fictional commit is different — it is permanent, it is indistinguishable from a real win in the artifact, and it corrupts the record that every future reader uses to decide what to believe. Between a bias you can detect and a history you cannot audit, take the bias.
+
+The cost is stated, not hidden: roughly 3σ of terminal drift, and fewer accepted changes per hundred trials. `control` prints both options and marks 2.8σ as the default; an operator who prefers the other trade sets 2.0σ and writes down that they did.
+
 **What actually moves the product.**
 
 1. **Replication.** If each trial is the mean of *n* runs, σ_eff = σ/√n, and the terminal drift in absolute units falls as 1/√n. Three runs per trial cuts drift by 42% and costs 3× the wall clock. This is the only lever that attacks σ itself, and it is why P30 and P29 matter more than any threshold.
@@ -368,7 +372,7 @@ The layered conclusion survives, for a simpler reason than v1 gave: **the cheap 
 
 ## If you only do five things
 
-1. **No-op trials → σ** (P30). Then `min_delta = 2σ`, and write down that it is a ratchet damper, not a significance test (P10, appendix).
+1. **No-op trials → σ** (P30). Then `min_delta = 2.8σ`: the choice is for **history integrity over terminal bias** (P10, appendix). Write down that it is a ratchet damper, not a significance test.
 2. **Baseline = mean of 3 runs, not one** (P29).
 3. **Assert `total_seconds − training_seconds` under a cap** (P28).
 4. **Interleave a fixed reference config every 10 trials; abort if it drifts** (P31).
