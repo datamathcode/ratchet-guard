@@ -14,7 +14,7 @@ benchmark and nothing anywhere else.
 
 from __future__ import annotations
 
-from .model import Contract, Direction, Measurement
+from .model import SEED_FLOOR, Contract, Direction, Measurement
 from .stats import diff_ci
 
 
@@ -29,8 +29,11 @@ def adjudicate(
     This is the check that makes the canary suite worth running: the canary
     says the surrogate is blind, and this is the adjudicator that covers it.
     """
-    if len(holdout.seeds) < 3:
-        return False, f"holdout produced {len(holdout.seeds)} seed(s); 3 are required to quote a delta"
+    if len(holdout.seeds) < SEED_FLOOR:
+        return False, (
+            f"holdout produced {len(holdout.seeds)} seed(s); {SEED_FLOOR} are required "
+            "before any delta is quotable"
+        )
 
     s = contract.metric.direction.sign()
     lo, hi = diff_ci(canonical.seeds, holdout.seeds)

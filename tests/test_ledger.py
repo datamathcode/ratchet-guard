@@ -96,5 +96,33 @@ class TestState(unittest.TestCase):
         self.assertEqual(s.family_gains["arch"], [0.05, 0.07])
 
 
+class TestNoisePooling(unittest.TestCase):
+    def test_within_arm_variance_is_pooled(self):
+        s = State()
+        s.update_noise((0.80, 0.82))
+        first = s.noise_sd
+        self.assertAlmostEqual(first, 0.014142, places=5)
+        s.update_noise((0.80, 0.82))
+        # Same spread twice: the estimate does not move, only its df.
+        self.assertAlmostEqual(s.noise_sd, first, places=6)
+        self.assertEqual(s.noise_df, 2)
+
+    def test_a_separated_pair_does_not_enter_the_estimate(self):
+        """The estimate is within-arm. Pooling means across configs would fold
+        the effect being measured into the noise, and the floor would appear to
+        shrink as the run succeeded."""
+        s = State()
+        for _ in range(5):
+            s.update_noise((0.90, 0.91))
+        before = s.noise_sd
+        s.update_noise((0.90, 0.91))
+        self.assertAlmostEqual(s.noise_sd, before, places=9)
+
+    def test_single_seed_contributes_nothing(self):
+        s = State()
+        s.update_noise((0.9,))
+        self.assertIsNone(s.noise_var)
+
+
 if __name__ == "__main__":
     unittest.main()

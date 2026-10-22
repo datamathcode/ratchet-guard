@@ -14,9 +14,17 @@ If it is missing, stop and ask for it. Do not invent one.
 |---|---|
 | the editable surface named in the contract | yours. One file, one idea per commit. |
 | `contract.toml` | **never.** If it is wrong, say so and stop. |
-| the evaluator | **never.** Its hash is checked. |
+| the evaluator | **never modify it, and do not read its source.** Its hash is checked; its internals are not yours to fit. |
 | `.ratchet/` | **never.** The harness writes it. |
 | `docs/` | **never** during a run. Write findings into `NOTES.md`. |
+
+**Why you may not read the evaluator.** You are optimised to use any information
+you are given, and the evaluator's source contains the split construction, the
+sampling order, and the exact evaluation window. A change that fits those is not
+a better model; it is a better answer to the specific questions in that file, and
+no hash check will catch it because nothing was modified. Work against the
+documented interface: it takes a command, it prints JSON, here are the fields.
+That is all you need and all you get.
 
 ## The one rule
 
@@ -68,6 +76,9 @@ not evidence that the gate is wrong.
    REJECT_GUARD / REJECT_VARIANCE / REJECT_BUDGET
                    the change bought quality with something that is not free.
                    Do not retry with a smaller version of the same trade.
+   REJECT_OVERHEAD the change moved work outside the scored budget — into import
+                   time, preprocessing, or a warmup. The metric cannot see that
+                   work, so it does not count. Do not do this again.
 
 7. If rejected, `git reset --hard HEAD~1`. The working branch must match the
    last accepted state before your next trial.
@@ -102,7 +113,13 @@ Stop the loop and write to `NOTES.md` — do not keep going — when any of thes
 happens:
 
 - `ratchet status` reports `HALTED`. The reason is specific. A halted run does
-  not measure.
+  not measure. Two of them are worth knowing by name:
+  - **`HALT_CONFIG`** — `min_delta` sits below the measured noise floor. Every
+    acceptance this run could produce is a noise record. Do not work around it
+    by proposing larger changes; the contract needs fixing by a human.
+  - **`HALT_DRIFT`** — the reference configuration moved. The machine changed
+    under the run and nothing measured across that point is comparable. More
+    trials make it worse.
 - The holdout budget is exhausted. More promotions would require a new sealed
   split, which is a human decision.
 - You are about to change the metric, the guards, or the canary set to make a

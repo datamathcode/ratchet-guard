@@ -17,10 +17,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-SEED_FLOOR = 3
+SEED_FLOOR = 4
 """Minimum replicate seeds before any delta may be quoted.
 
-Two seeds cannot estimate a noise floor: the range of two draws is the gap
+Three seeds cannot support a rank test at alpha=0.05: the smallest attainable
+two-sided Mann-Whitney p with 3 per arm is 2/C(6,3) = 0.10. Four gives
+2/C(8,4) = 0.029, which is the smallest n at which a reported rank test is
+capable of clearing the conventional threshold at all.
+
+Two seeds remains worse than useless: the range of two draws is the gap
 between two arbitrary points, not a variance.
 """
 
@@ -39,6 +44,7 @@ class Verdict(str, Enum):
     ACCEPT_DEBT = "accept_debt"
     REJECT_NOISE = "reject_noise"
     REJECT_GUARD = "reject_guard"
+    REJECT_OVERHEAD = "reject_overhead"
     REJECT_VARIANCE = "reject_variance"
     REJECT_DOMINATED = "reject_dominated"
     REJECT_PROVENANCE = "reject_provenance"
@@ -46,9 +52,16 @@ class Verdict(str, Enum):
     CRASH = "crash"
     HALT_METRIC = "halt_metric"
     HALT_HOLDOUT = "halt_holdout"
+    HALT_DRIFT = "halt_drift"
+    HALT_CONFIG = "halt_config"
 
 
-BLOCKING_HALTS = frozenset({Verdict.HALT_METRIC, Verdict.HALT_HOLDOUT})
+BLOCKING_HALTS = frozenset({
+    Verdict.HALT_METRIC,
+    Verdict.HALT_HOLDOUT,
+    Verdict.HALT_DRIFT,
+    Verdict.HALT_CONFIG,
+})
 
 
 @dataclass(frozen=True)
@@ -112,6 +125,7 @@ class Contract:
     canary_every: int = 25
     variance_inflation_tolerance: float = 2.0
     max_unadjudicated: int = 5
+    wall_overhead_cap: float | None = 0.10
     raw: dict[str, Any] = field(default_factory=dict)
 
     def digest(self) -> str:
@@ -181,6 +195,10 @@ class Contract:
             canary_every=int(raw.get("canary_every", 25)),
             variance_inflation_tolerance=float(raw.get("variance_inflation_tolerance", 2.0)),
             max_unadjudicated=int(raw.get("max_unadjudicated", 5)),
+            wall_overhead_cap=(
+                None if raw.get("wall_overhead_cap", 0.10) is None
+                else float(raw.get("wall_overhead_cap", 0.10))
+            ),
             raw=raw,
         )
 

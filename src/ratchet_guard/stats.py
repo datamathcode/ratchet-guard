@@ -120,6 +120,40 @@ def mann_whitney(a: Sequence[float], b: Sequence[float]) -> tuple[float, float]:
     return (u1, min(1.0, p))
 
 
+def paired_diff_ci(
+    candidate: Sequence[float],
+    reference: Sequence[float],
+    n_boot: int = 4000,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> tuple[float, float]:
+    """Bootstrap CI for the mean of per-pair differences.
+
+    The reference arm was measured in the same session as the candidate, so
+    pairing removes whatever the machine was doing that session. This is the
+    drift-robust comparison: unpaired arms measured hours apart are comparing
+    two different machines.
+    """
+    cand = list(candidate)
+    ref = list(reference)
+    if len(cand) != len(ref):
+        raise ValueError(f"paired arms must match: {len(cand)} vs {len(ref)}")
+    diffs = [c - r for c, r in zip(cand, ref)]
+    return bootstrap_ci(diffs, n_boot=n_boot, alpha=alpha, seed=seed)
+
+
+def rel_sd_of_sd(n: int) -> float:
+    """Relative uncertainty of a standard deviation estimated from n samples.
+
+    ~1/sqrt(2(n-1)). At n=3 this is 0.50 -- a sigma estimate that is itself
+    +/-50%. Quoting "three runs give sigma" is the same too-small-n error that
+    makes a two-run noise floor worthless.
+    """
+    if n < 2:
+        return float("inf")
+    return 1.0 / math.sqrt(2.0 * (n - 1))
+
+
 def _norm_cdf(z: float) -> float:
     return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 

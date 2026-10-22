@@ -129,7 +129,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="linear", choices=sorted(LOC_DELTA))
     ap.add_argument("--split", default="dev", choices=["dev", "sealed"])
-    ap.add_argument("--seeds", type=int, default=3)
+    ap.add_argument("--seeds", type=int, default=4)
     args = ap.parse_args()
 
     rows = DEV if args.split == "dev" else SEALED

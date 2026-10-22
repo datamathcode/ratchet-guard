@@ -9,6 +9,7 @@ fixed order so a rejection can be attributed to exactly one cause.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from statistics import mean, stdev
 
@@ -21,7 +22,7 @@ from .model import (
     Measurement,
     Verdict,
 )
-from .stats import diff_ci, mann_whitney
+from .stats import diff_ci, mann_whitney, paired_diff_ci
 
 EPS = 1e-12
 
@@ -37,6 +38,11 @@ class GateState:
     halt_reason: str = ""
     unadjudicated: int = 0
     under_explored: bool = True
+    noise_var: float | None = None
+    noise_df: int = 0
+    reference: dict | None = None
+    trials_since_reference: int = 0
+    drift_detected: bool = False
 
 
 @dataclass
@@ -93,6 +99,30 @@ def decide(
     if crashes:
         return Decision(Verdict.CRASH, 0.0, (0.0, 0.0), "evaluator failed; nothing to judge", checks)
 
+    # --- gate 0b: drift ----------------------------------------------------
+    if state.drift_detected:
+        return Decision(
+            Verdict.HALT_DRIFT, 0.0, (0.0, 0.0),
+            "the reference configuration drifted; trials are not exchangeable and "
+            "no delta from this session is quotable. Fix the machine, re-run `control`.",
+            checks,
+        )
+
+    # --- gate 0c: the contract cannot see its own noise --------------------
+    noise_sd = math.sqrt(state.noise_var) if state.noise_var else None
+    checks["noise"] = {
+        "sd": noise_sd, "df": state.noise_df, "min_delta": contract.min_delta,
+        "ratio": (contract.min_delta / noise_sd) if noise_sd else None,
+    }
+    if noise_sd and contract.min_delta < noise_sd:
+        return Decision(
+            Verdict.HALT_CONFIG, 0.0, (0.0, 0.0),
+            f"min_delta {contract.min_delta:.6f} is below the measured noise floor "
+            f"{noise_sd:.6f}; acceptances below 1 sigma are noise records, not improvements. "
+            "Raise min_delta and restart.",
+            checks,
+        )
+
     # --- gate 1: provenance -------------------------------------------------
     digest = cand.meta.get("contract_digest")
     if digest is not None and digest != contract.digest():
@@ -145,6 +175,32 @@ def decide(
             )
     checks["guards"] = guard_report
 
+    # --- gate 3b: the unscored half of the wall clock ----------------------
+    # The budget is defined as training time, excluding startup and
+    # compilation. Whatever an evaluator spends in import, preprocessing or a
+    # warmup phase is compute no rule scores -- and it is free to move real
+    # work there.
+    work_s = cand.meta.get("work_s")
+    if contract.wall_overhead_cap is not None and work_s is not None and cand.wall_s > 0:
+        try:
+            work = float(work_s)
+        except (TypeError, ValueError):
+            work = None
+        if work is not None:
+            overhead = max(0.0, (cand.wall_s - work) / cand.wall_s)
+            checks["overhead"] = {
+                "work_s": work, "wall_s": cand.wall_s,
+                "fraction": round(overhead, 4), "cap": contract.wall_overhead_cap,
+            }
+            if overhead > contract.wall_overhead_cap:
+                return Decision(
+                    Verdict.REJECT_OVERHEAD, 0.0, (0.0, 0.0),
+                    f"{overhead:.1%} of the wall clock is unscored (cap "
+                    f"{contract.wall_overhead_cap:.1%}); work moved outside the budget "
+                    "is work the comparison does not price",
+                    checks,
+                )
+
     # --- gate 4: variance inflation ---------------------------------------
     base_sd = stdev(baseline.seeds) if len(baseline.seeds) > 1 else 0.0
     cand_sd = stdev(cand.seeds) if len(cand.seeds) > 1 else 0.0
@@ -158,19 +214,35 @@ def decide(
         )
 
     # --- gate 5: effect size against the noise floor ----------------------
+    # If the evaluator measured the reference configuration in the SAME session
+    # and reported it as `reference_seeds`, compare paired. Pairing removes
+    # whatever the machine was doing that hour; unpaired arms measured hours
+    # apart are comparing two different machines.
     cx = contract.complexity_price * cand.loc_delta
-    d_lo, d_hi = diff_ci(baseline.seeds, cand.seeds)
     s = contract.metric.direction.sign()
+    ref_seeds = cand.meta.get("reference_seeds")
+    paired = (
+        isinstance(ref_seeds, (list, tuple))
+        and len(ref_seeds) == len(cand.seeds) > 0
+    )
+    if paired:
+        ref = tuple(float(x) for x in ref_seeds)
+        d_lo, d_hi = paired_diff_ci(cand.seeds, ref)
+        arm = Measurement(value=mean(ref), seeds=ref, guards=dict(baseline.guards))
+    else:
+        d_lo, d_hi = diff_ci(baseline.seeds, cand.seeds)
+        arm = baseline
     ci_lo, ci_hi = min(-s * d_hi, -s * d_lo) - cx, max(-s * d_hi, -s * d_lo) - cx
-    gain = effect(contract, baseline, cand)
+    gain = effect(contract, arm, cand)
     threshold = max(contract.min_delta, 0.0)
-    _, p = mann_whitney(baseline.seeds, cand.seeds)
+    _, p = mann_whitney(arm.seeds, cand.seeds)
     checks["effect"] = {
-        "raw_delta": contract.metric.direction.sign() * (baseline.value - cand.value),
+        "raw_delta": s * (arm.value - cand.value),
         "complexity_cost": cx,
         "gain": gain, "ci": [ci_lo, ci_hi],
         "min_delta": contract.min_delta, "mann_whitney_p": p,
-        "mean_baseline": mean(baseline.seeds), "mean_candidate": mean(cand.seeds),
+        "paired": paired,
+        "mean_baseline": mean(arm.seeds), "mean_candidate": mean(cand.seeds),
     }
 
     if ci_lo > threshold:

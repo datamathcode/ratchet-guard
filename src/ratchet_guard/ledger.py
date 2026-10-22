@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from statistics import stdev
 
 from .model import Contract, DebtEntry, Measurement, Trial
 
@@ -35,6 +37,7 @@ class State:
     baseline_commit: str = ""
     canonical: dict | None = None
     canonical_commit: str = ""
+    canonical_dev: dict | None = None
     holdout_reads_used: int = 0
     open_debt: list[dict] = field(default_factory=list)
     family_counts: dict[str, int] = field(default_factory=dict)
@@ -42,6 +45,11 @@ class State:
     canary_results: list[dict] = field(default_factory=list)
     promotions: list[dict] = field(default_factory=list)
     blind_spots: list[str] = field(default_factory=list)
+    noise_var: float | None = None
+    noise_df: int = 0
+    reference: dict | None = None
+    trials_since_reference: int = 0
+    drift_detected: bool = False
     unadjudicated: int = 0
     consecutive_crashes: int = 0
     halted: bool = False
@@ -75,8 +83,31 @@ class State:
     def record(self, trial: Trial, family: str, gain: float) -> None:
         self.trials.append(trial.to_dict())
         self.trial_ordinal += 1
+        self.trials_since_reference += 1
         self.family_counts[family] = self.family_counts.get(family, 0) + 1
         self.family_gains.setdefault(family, []).append(gain)
+
+    def update_noise(self, seeds: tuple[float, ...]) -> None:
+        """Pool this trial's WITHIN-arm variance into a running estimate.
+
+        Within-arm only. Pooling all seeds across configs would fold the very
+        effect being measured into the noise estimate, which is the mistake
+        that makes a floor look like it shrinks as the run succeeds.
+        """
+        if len(seeds) < 2:
+            return
+        var = stdev(seeds) ** 2
+        df = len(seeds) - 1
+        if self.noise_var is None or self.noise_df <= 0:
+            self.noise_var, self.noise_df = var, df
+            return
+        total = self.noise_df + df
+        self.noise_var = (self.noise_var * self.noise_df + var * df) / total
+        self.noise_df = total
+
+    @property
+    def noise_sd(self) -> float | None:
+        return math.sqrt(self.noise_var) if self.noise_var else None
 
 
 class Ledger:

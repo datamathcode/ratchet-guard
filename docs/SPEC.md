@@ -2,7 +2,9 @@
 
 Normative. `MUST`, `MUST NOT`, `SHOULD`, `MAY` are used in the RFC 2119 sense.
 
-Version 0.1.0.
+Version 0.2.0.
+
+**Changes in 0.2.0.** Replicate floor raised 3 → 4; `min_delta` may no longer sit below the measured noise floor; a wall-clock overhead gate added; a calibration tier added (`control`, `drift`); paired comparison supported via `reference_seeds`; three new verdicts.
 
 ---
 
@@ -52,7 +54,8 @@ prevent.
 |---|---|---|
 | `min_delta` | `0.0` | smallest gain worth believing, in metric units |
 | `complexity_price` | `0.0` | metric units charged per line added |
-| `seed_replicates` | `3` | minimum seeds per measurement (floor of 3 is enforced) |
+| `seed_replicates` | `4` | minimum seeds per measurement (floor of 4 is enforced) |
+| `wall_overhead_cap` | `0.10` | max share of wall clock not covered by `meta.work_s`; `none` disables |
 | `max_trials` | `400` | hard trial budget |
 | `max_unadjudicated` | `5` | accepted-but-unadjudicated changes allowed |
 | `exploration_fraction` | `0.15` | share of trials usable as debt |
@@ -96,12 +99,13 @@ The evaluator MUST print exactly one JSON object as its last line on stdout:
 
 ```json
 {"value": 0.9312,
- "seeds": [0.9298, 0.9310, 0.9328],
+ "seeds": [0.9298, 0.9310, 0.9328, 0.9301],
  "guards": {"peak_mem_mb": 812.4},
  "wall_s": 300.1,
  "peak_mem_mb": 812.4,
  "loc_delta": 41,
- "meta": {}}
+ "meta": {"work_s": 296.2,
+          "reference_seeds": [0.9201, 0.9198, 0.9204, 0.9200]}}
 ```
 
 Rules:
@@ -109,7 +113,19 @@ Rules:
 - `value` is REQUIRED. It is the mean of `seeds` if `seeds` is present; an
   implementation MUST reject a `value` that disagrees with the mean of `seeds`
   beyond floating-point tolerance.
-- `seeds` SHOULD have at least three entries. Fewer than three is a rejection.
+- `seeds` MUST have at least four entries. Fewer than four is a rejection: with
+  three per arm the smallest attainable two-sided Mann–Whitney p is 2/C(6,3) =
+  0.10, so no three-seed comparison can clear α=0.05 whatever the effect size
+  (P11).
+- `meta.work_s` is OPTIONAL and SHOULD be reported. It is the part of `wall_s`
+  the metric actually scores — training time, excluding startup and
+  compilation. When present and `wall_overhead_cap` is set, the unscored share
+  is a rejection condition (P28).
+- `meta.reference_seeds` is OPTIONAL. When present, of the same length as
+  `seeds`, it is the reference configuration measured **interleaved in the same
+  session**. The comparison against the baseline then becomes paired by index,
+  which cancels machine drift (P31). An implementation SHOULD prefer the paired
+  interval whenever it is available.
 - A non-zero exit, a timeout, or unparseable output is a **crash**. A crash MUST
   NOT produce a numeric value. It MUST produce a distinct status and a stored
   traceback tail.
@@ -130,6 +146,24 @@ gate so the ledger can be read as a record of *why*.
 If `state.halted`, return `HALT_METRIC` with the stored reason. A halted run
 performs no measurements.
 
+### Gate 0b — drift
+
+If `state.drift_detected`, return `HALT_DRIFT`. A reference configuration whose
+re-measured mean has moved beyond the drift threshold means the machine changed
+under the run, and no comparison in this session is trustworthy (P31). The
+remedy is `control`, not more trials.
+
+### Gate 0c — contract viability
+
+If `state.noise_var` is known, let `σ = sqrt(state.noise_var)`. If
+`min_delta < σ`, return `HALT_CONFIG`.
+
+Rationale: a threshold below one measured standard deviation cannot separate
+signal from noise, so every acceptance the contract could produce is a noise
+record (P10, P27). This is a configuration fault, not a trial outcome, and it is
+worth stopping the run to say so once rather than rejecting a hundred trials
+politely.
+
 ### Gate 1 — provenance
 
 If the candidate's `meta.contract_digest` is present and differs from the current
@@ -140,11 +174,13 @@ silently pooling them is P8.
 
 ### Gate 2 — replicate floor
 
-Let `n = len(candidate.seeds)`. If `n < max(3, seed_replicates)`, return
+Let `n = len(candidate.seeds)`. If `n < max(4, seed_replicates)`, return
 `REJECT_NOISE`.
 
 Rationale: two seeds cannot estimate a spread; the range of two draws is the gap
-between two arbitrary points (P11).
+between two arbitrary points (P11). Three is not enough either — the smallest
+attainable two-sided p at n=3 per arm is 0.10, so the comparison cannot be
+reported at α=0.05 regardless of effect size.
 
 ### Gate 3 — guards
 
@@ -157,6 +193,22 @@ degradation = (b - c) / max(|b|, eps)      if the guard is maximised
 
 If `degradation > tolerance`, return `REJECT_GUARD`. If either value is missing
 and `tolerance < 1`, return `REJECT_GUARD`.
+
+### Gate 3b — overhead
+
+If `wall_overhead_cap` is set and `meta.work_s` is reported, let
+
+```
+overhead = (wall_s - work_s) / max(wall_s, eps)
+```
+
+If `overhead > wall_overhead_cap`, return `REJECT_OVERHEAD`.
+
+Rationale: the budget is defined as scored work time, and everything outside it
+is compute the metric never sees. Without this check an agent can move the work
+into import time and it is free (P28). If `meta.work_s` is absent the check is
+skipped, not failed — an unreported cost here is a missing signal, not evidence
+of abuse.
 
 ### Gate 4 — variance
 
@@ -186,9 +238,17 @@ gain_ci = [-s*d_hi - cost, -s*d_lo - cost]     (then sorted)
 
 If `gain_ci_lo > max(min_delta, 0)`, the candidate passes.
 
-The two arms MUST be resampled with **independent** random streams. Resampling
-both with one seed pairs them index by index, cancels shared variance, and
-produces an interval that is far too narrow.
+**Choice of comparison arm.** If the candidate reports `meta.reference_seeds`
+with the same length as `seeds`, the interval MUST be computed as a paired
+difference against those seeds, and the gain computed against their mean, not
+against `state.baseline`. The reference was measured in the same session, so a
+shared drift offset cancels and the interval is immune to P31. Otherwise the
+interval MUST be computed as an unpaired difference against `state.baseline`.
+
+The two arms MUST be resampled with **independent** random streams in the
+unpaired case. Resampling both with one seed pairs them index by index, cancels
+shared variance, and produces an interval that is far too narrow. In the paired
+case the pairing is real and the resampling MUST be over paired differences.
 
 ### Gate 6 — queue discipline
 
@@ -229,6 +289,36 @@ commit.
 
 ---
 
+## 6b. Calibration
+
+Calibration is what makes gates 0c and 5 mean anything. It happens before the
+first trial and repeats during the run.
+
+`control --cmd <incumbent, unchanged> --runs n` measures the reference
+configuration with nothing changed. It MUST:
+
+1. run the evaluator `n` times,
+2. pool the seeds, compute `sd`, and store `noise_var` and `noise_df`,
+3. store the mean as `reference`, with its trial index,
+4. report `min_delta` as a multiple of the measured sd, and report the relative
+   uncertainty of that sd.
+
+A no-op can never improve, which is why nobody runs one, and why its absence is
+P30. `n` SHOULD be at least 5; `n=3` yields ±50% on σ and is only enough to
+detect an order-of-magnitude mistake.
+
+After calibration, every trial MUST pool its **within-arm** variance into
+`noise_var`. Pooling must never cross arms: variance between configurations
+contains the effect being measured, and the floor would appear to shrink as the
+run succeeded.
+
+`drift --cmd <reference>` re-measures the reference and compares its mean to the
+stored one. If the difference exceeds the declared threshold in standard errors,
+the implementation MUST set `drift_detected`, which halts the run at gate 0b. A
+successful `control` clears a drift halt, and only a drift halt.
+
+---
+
 ## 7. Promotion
 
 `promote(trial, holdout_measurement) -> bool`
@@ -238,7 +328,7 @@ Requirements, all of which MUST hold:
 1. The trial's verdict is `accept` or `accept_debt`.
 2. `holdout_reads_used < holdout_budget`. Otherwise `HALT_HOLDOUT`.
 3. The adjudicator command depends on the candidate (contains `{candidate}`).
-4. The holdout measurement has at least three seeds.
+4. The holdout measurement has at least four seeds.
 5. The holdout does not include zero gain versus the canonical baseline:
    `min(s*d_lo, s*d_hi) > 0`.
 6. The gain covers the complexity price, if one is set.
@@ -246,10 +336,13 @@ Requirements, all of which MUST hold:
 On success: the canonical baseline becomes the holdout measurement, and
 `unadjudicated` resets to zero.
 
-On failure: the working baseline MUST be restored to the surrogate measurement
-of the canonical commit, found by looking up that commit in the ledger. If the
-commit is not in the ledger, the implementation MUST refuse to guess and MUST
-print the `git reset` command instead.
+On failure: the working baseline MUST be restored to the **surrogate** reading of
+the canonical commit — never the adjudicated one, because the two are different
+instruments and subtracting them compares numbers that do not share a scale. The
+implementation MUST keep that reading (`canonical_dev`) alongside the
+adjudicated `canonical`. It MAY fall back to looking the commit up in the ledger;
+if neither is available it MUST refuse to guess and MUST print the `git reset`
+command instead.
 
 A refusal is not an error. It is the system working.
 
@@ -269,6 +362,8 @@ These MUST hold at all times, and an implementation SHOULD assert them.
 6. **A blind spot is never silent.** Every uncovered blind spot halts the run.
 7. **Surrogate and adjudicated numbers are never subtracted.** They are
    different instruments.
+8. **A delta is only quotable above the measured noise floor.** If `min_delta` is
+   known to be below it, the run stops rather than producing verdicts.
 
 ---
 

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import stdev
 
 from . import families, ladder
 from .canary import run_canaries, uncovered
@@ -20,6 +22,7 @@ from .gate import GateState, decide, pareto_frontier, settle_debt
 from .ledger import Ledger, State
 from .model import (
     BLOCKING_HALTS,
+    SEED_FLOOR,
     Contract,
     DebtEntry,
     Measurement,
@@ -27,6 +30,7 @@ from .model import (
     Verdict,
 )
 from .sandbox import EvalError, hash_paths, run_eval
+from .stats import rel_sd_of_sd
 
 DEFAULT_STATE = ".ratchet"
 
@@ -65,6 +69,11 @@ def _gate_state(contract: Contract, state: State, family: str) -> GateState:
         halt_reason=state.halt_reason,
         unadjudicated=state.unadjudicated,
         under_explored=families.under_explored(contract, state.family_counts, family),
+        noise_var=state.noise_var,
+        noise_df=state.noise_df,
+        reference=state.reference,
+        trials_since_reference=state.trials_since_reference,
+        drift_detected=state.drift_detected,
     )
 
 
@@ -95,22 +104,46 @@ def cmd_init(args) -> int:
 
 def cmd_baseline(args) -> int:
     contract, state, ledger = _load(args)
-    try:
-        meas = run_eval(args.cmd, timeout_s=args.timeout, cwd=args.cwd)
-    except EvalError as exc:
-        print(f"baseline failed: {exc}", file=sys.stderr)
-        return 1
-    if len(meas.seeds) < 3:
+    # The baseline is the reference for every delta in the run, so it must be a
+    # mean of independent runs, not one draw. One cold-start measurement means
+    # every later comparison inherits its error, and that error does not shrink
+    # as the run continues.
+    runs = max(1, args.runs)
+    pooled: list[float] = []
+    per_run: list[float] = []
+    for i in range(runs):
+        try:
+            m = run_eval(args.cmd, timeout_s=args.timeout, cwd=args.cwd)
+        except EvalError as exc:
+            print(f"baseline run {i + 1}/{runs} failed: {exc}", file=sys.stderr)
+            return 1
+        pooled.extend(m.seeds)
+        per_run.append(m.value)
+        meas = m
+    meas = Measurement(
+        value=sum(pooled) / len(pooled),
+        seeds=tuple(pooled),
+        guards=meas.guards,
+        wall_s=meas.wall_s,
+        peak_mem_mb=meas.peak_mem_mb,
+        loc_delta=meas.loc_delta,
+        meta={**meas.meta, "runs": runs, "per_run": per_run},
+    )
+    required = max(SEED_FLOOR, contract.seed_replicates)
+    if len(meas.seeds) < required:
         print(
-            f"refusing: baseline has {len(meas.seeds)} seed(s). Re-run with >= 3 to "
-            "establish a noise floor before any comparison is made.",
+            f"refusing: baseline has {len(meas.seeds)} seed(s) from {runs} run(s); "
+            f"{required} are required. Pass --runs {required}.",
             file=sys.stderr,
         )
         return 1
     state.baseline = meas.to_dict()
     state.baseline_commit = args.commit or "unknown"
+    state.canonical_dev = meas.to_dict()   # surrogate reading of the canonical commit
+    state.update_noise(meas.seeds)
     state.save(args.state)
-    print(f"baseline  : {contract.metric.name} = {meas.value:.6f} over {len(meas.seeds)} seeds")
+    print(f"baseline  : {contract.metric.name} = {meas.value:.6f} "
+          f"over {len(meas.seeds)} seeds from {runs} run(s)")
 
     # The canonical baseline lives on a DIFFERENT split. Recording the
     # surrogate number here and later comparing a holdout number against it
@@ -225,6 +258,8 @@ def cmd_trial(args) -> int:
     trial.checks = decision.checks
     ledger.append(trial, decision.verdict.value, decision.gain, decision.ci, contract)
     state.record(trial, args.family, decision.gain)
+    if not crashed:
+        state.update_noise(trial.measurement.seeds)
 
     if decision.verdict is Verdict.ACCEPT:
         state.baseline = trial.measurement.to_dict()
@@ -256,6 +291,13 @@ def cmd_trial(args) -> int:
     state.save(args.state)
 
     print(f"[{tid}] {decision.verdict.value.upper():<16} {decision.reason}")
+    floor = state.noise_sd
+    if floor and decision.verdict in (Verdict.REJECT_NOISE, Verdict.ACCEPT, Verdict.ACCEPT_DEBT):
+        ratio = contract.min_delta / floor if floor else float("inf")
+        if ratio < 2.0:
+            print(f"  note: min_delta is {ratio:.2f}x the measured noise sd "
+                  f"({floor:.6f}); at this ratio the ratchet records noise.",
+                  file=sys.stderr)
     if args.json:
         print(json.dumps(decision.to_dict(), indent=2))
     if decision.verdict in BLOCKING_HALTS or state.halted:
@@ -322,32 +364,145 @@ def cmd_promote(args) -> int:
     if ok:
         state.canonical = holdout.to_dict()
         state.canonical_commit = trial["commit"]
+        state.canonical_dev = trial["measurement"]
         state.unadjudicated = 0
         print(f"PROMOTED {args.trial}: {reason}")
     else:
         print(f"PROMOTION DENIED {args.trial}: {reason}", file=sys.stderr)
-        # Restore the working baseline to the dev-split measurement of the
-        # canonical commit. Leaving the rejected candidate in place would make
-        # `status` report a baseline the run has already decided against.
-        restored = next(
-            (t for t in state.trials if t["commit"] == state.canonical_commit),
-            None,
-        )
+        # Restore the working baseline to the SURROGATE reading of the canonical
+        # commit. Restoring the adjudicated reading would compare a holdout
+        # number against surrogate numbers for the rest of the run.
+        restored = state.canonical_dev
+        if restored is None:
+            restored = next(
+                (t["measurement"] for t in state.trials
+                 if t["commit"] == state.canonical_commit),
+                None,
+            )
         if restored is not None:
-            state.baseline = restored["measurement"]
+            state.baseline = restored
             state.baseline_commit = state.canonical_commit
+            state.unadjudicated = 0
         else:
             print(
-                f"working baseline not restorable from the ledger; "
+                "working baseline could not be restored automatically; "
                 f"run: git reset --hard {state.canonical_commit}",
                 file=sys.stderr,
             )
-        print(f"roll back the working branch: git reset --hard {state.canonical_commit}", file=sys.stderr)
-        state.unadjudicated = 0
+            state.unadjudicated = 0
 
     print(f"holdout reads used: {state.holdout_reads_used}/{contract.holdout_budget}")
     state.save(args.state)
     return 0 if ok else 1
+
+
+def cmd_control(args) -> int:
+    """Measure an unchanged configuration N times. This is the noise floor.
+
+    A no-op trial cannot possibly improve, which is why nobody runs one -- and
+    why it is the cheapest and most informative trial in the run. Without it
+    every other statistic here is advice about a number you do not have.
+    """
+    contract, state, ledger = _load(args)
+    runs = max(2, args.runs)
+    seeds: list[float] = []
+    means: list[float] = []
+    for i in range(runs):
+        try:
+            m = run_eval(args.cmd, timeout_s=args.timeout, cwd=args.cwd)
+        except EvalError as exc:
+            print(f"control run {i + 1}/{runs} failed: {exc}", file=sys.stderr)
+            return 1
+        seeds.extend(m.seeds)
+        means.append(m.value)
+
+    sd = stdev(seeds) if len(seeds) > 1 else 0.0
+    state.noise_var = sd ** 2
+    state.noise_df = len(seeds) - 1
+    state.reference = {
+        "value": sum(seeds) / len(seeds),
+        "sd": sd, "n": len(seeds), "at_trial": state.trial_ordinal,
+    }
+    state.trials_since_reference = 0
+    state.drift_detected = False
+    # Re-baselining is the documented remedy for a drift halt, so clear it --
+    # but only a drift halt. A metric or budget halt is not cleared by a
+    # measurement.
+    if state.halted and "drifted" in (state.halt_reason or ""):
+        state.halted = False
+        state.halt_reason = ""
+    state.save(args.state)
+
+    print(f"reference : {contract.metric.name} = {state.reference['value']:.6f}")
+    print(f"runs      : {runs} ({len(seeds)} seeds)")
+    print(f"noise sd  : {sd:.6f}  (relative uncertainty of this estimate: "
+          f"+/-{rel_sd_of_sd(len(seeds)):.0%})")
+    print()
+    print(f"  min_delta 1.0x sd = {sd:.6f}   acceptances below this are noise records")
+    print(f"  min_delta 2.0x sd = {2 * sd:.6f}  ~92% one-sided (single comparison)")
+    print(f"  min_delta 2.8x sd = {2.8 * sd:.6f}  ~97.5% one-sided (ratchet damper)")
+
+    if contract.min_delta < sd:
+        print(f"\nWARNING: contract min_delta {contract.min_delta:.6f} is below 1 sd. "
+              "The gate will halt the run at the first trial until this is raised.",
+              file=sys.stderr)
+    elif contract.min_delta < 2 * sd:
+        print(f"\nWARNING: contract min_delta {contract.min_delta:.6f} is below 2 sd "
+              f"({2 * sd:.6f}). Expect a high false-accept rate.", file=sys.stderr)
+    if len(seeds) < 10:
+        print(f"\nNOTE: {len(seeds)} seeds gives a sd estimate that is itself "
+              f"+/-{rel_sd_of_sd(len(seeds)):.0%}. The floor tightens automatically as "
+              "trials accumulate; re-run `control` after ~10 trials.", file=sys.stderr)
+    return 0
+
+
+def cmd_drift(args) -> int:
+    """Re-measure the reference config and compare it to the stored one.
+
+    A shared GPU drifts: thermal throttling, memory fragmentation, other
+    tenants. If the reference moved, the trials either side of it were not
+    drawn from the same distribution, and no rank test in the ledger is valid.
+    """
+    contract, state, ledger = _load(args)
+    if not state.reference:
+        print("no reference recorded; run `ratchet control` first", file=sys.stderr)
+        return 1
+    try:
+        m = run_eval(args.cmd, timeout_s=args.timeout, cwd=args.cwd)
+    except EvalError as exc:
+        print(f"drift check failed: {exc}", file=sys.stderr)
+        return 1
+
+    ref = state.reference
+    n_new = max(1, len(m.seeds))
+    n_old = max(1, ref["n"])
+    se = math.sqrt((ref["sd"] ** 2) / n_old + (stdev(m.seeds) ** 2 if n_new > 1 else 0) / n_new)
+    delta = m.value - ref["value"]
+    z = (delta / se) if se > 0 else 0.0
+
+    print(f"reference was {ref['value']:.6f} (sd {ref['sd']:.6f}, n={n_old}, "
+          f"at trial {ref['at_trial']})")
+    print(f"reference now {m.value:.6f}   delta {delta:+.6f}   z = {z:+.2f}")
+    print(f"trials since last check: {state.trials_since_reference}")
+
+    if abs(z) > args.threshold:
+        state.drift_detected = True
+        state.halted = True
+        state.halt_reason = (
+            f"reference configuration drifted {delta:+.6f} (z={z:+.2f}); "
+            "trials either side of this are not comparable"
+        )
+        state.save(args.state)
+        print(f"\nHALT: {state.halt_reason}", file=sys.stderr)
+        print("Fix the machine, then re-run `control` to re-baseline and clear the halt.",
+              file=sys.stderr)
+        return 2
+
+    state.trials_since_reference = 0
+    state.drift_detected = False
+    state.save(args.state)
+    print("no drift detected")
+    return 0
 
 
 def cmd_status(args) -> int:
@@ -363,6 +518,19 @@ def cmd_status(args) -> int:
     print(f"holdout     : {state.holdout_reads_used} / {contract.holdout_budget} reads")
     print(f"open debt   : {len(state.open_debt)}")
     print(f"blind spots : {', '.join(state.blind_spots) or 'none detected'}")
+    sd = state.noise_sd
+    if sd:
+        print(f"noise floor : {sd:.6f} (df={state.noise_df}, "
+              f"min_delta = {contract.min_delta / sd:.2f} sd)")
+    else:
+        print("noise floor : UNKNOWN — run `ratchet control`. No delta is quotable without it.")
+    if state.reference:
+        stale = state.trials_since_reference
+        flag = "  <-- OVERDUE" if stale > contract.canary_every else ""
+        print(f"reference   : {state.reference['value']:.6f} "
+              f"({stale} trials since check){flag}")
+    if state.drift_detected:
+        print("drift       : DETECTED — trials are not exchangeable")
     if state.halted:
         print(f"HALTED      : {state.halt_reason}")
     else:
@@ -471,9 +639,23 @@ def build_parser() -> argparse.ArgumentParser:
     common(sp)
     sp.add_argument("--cmd", required=True)
     sp.add_argument("--commit", default="")
+    sp.add_argument("--runs", type=int, default=3,
+                    help="independent runs pooled into the baseline (default 3)")
     sp.add_argument("--canonical-cmd", default=None,
                     help="measure the incumbent on the adjudicated split")
     sp.set_defaults(func=cmd_baseline)
+
+    sp = sub.add_parser("control", help="measure an unchanged config to get the noise floor")
+    common(sp)
+    sp.add_argument("--cmd", required=True)
+    sp.add_argument("--runs", type=int, default=8)
+    sp.set_defaults(func=cmd_control)
+
+    sp = sub.add_parser("drift", help="re-measure the reference config and compare")
+    common(sp)
+    sp.add_argument("--cmd", required=True)
+    sp.add_argument("--threshold", type=float, default=3.0)
+    sp.set_defaults(func=cmd_drift)
 
     sp = sub.add_parser("canary", help="calibrate the metric against known mutants")
     common(sp)

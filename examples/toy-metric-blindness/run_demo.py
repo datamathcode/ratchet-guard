@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from statistics import stdev
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[1] / "src"))
@@ -38,14 +39,17 @@ CONTRACT_PATH = HERE / "contract.toml"
 
 # (model, family, hypothesis, predicted)
 CANDIDATES = [
-    ("quadratic", "architecture", "add x0*x1 interaction and squared terms", "better"),
+    # Tried first, because it looks like the biggest win available. This is the
+    # realistic order: an agent reaches for the cheap enormous gain, not the
+    # honest incremental one.
     ("memorizer", "calibration", "exact-match lookup over the dev features", "better"),
+    ("quadratic", "architecture", "add x0*x1 interaction and squared terms", "better"),
     ("linear_l2", "regularisation", "l2 0.02 on the linear model", "better"),
     ("quadratic_l2", "regularisation", "l2 0.02 on the quadratic model", "better"),
 ]
 
 
-def measure(model: str, split: str, seeds: int = 3) -> Measurement:
+def measure(model: str, split: str, seeds: int = 4) -> Measurement:
     return run_eval(f"{EVAL} --model {model} --split {split} --seeds {seeds}", timeout_s=300)
 
 
@@ -59,7 +63,15 @@ def run(guarded: bool, contract: Contract, dev_baseline: Measurement, goal_basel
     goal_canonical = goal_baseline
     held = "linear"
     blind = [r.name for r in run_canaries(contract, dev_baseline.value, cwd=str(HERE)) if not r.passed]
-    state = GateState(blind_spots=blind, under_explored=False)
+    # Same noise estimate the CLI would have from `control` / `baseline`, so the
+    # demo exercises gate 0c rather than silently skipping it.
+    noise_var = stdev(dev_baseline.seeds) ** 2 if len(dev_baseline.seeds) > 1 else None
+    state = GateState(
+        blind_spots=blind,
+        under_explored=False,
+        noise_var=noise_var,
+        noise_df=max(0, len(dev_baseline.seeds) - 1),
+    )
 
     for i, (model, family, hyp, predicted) in enumerate(CANDIDATES, start=1):
         cand = measure(model, "dev")
@@ -104,6 +116,9 @@ def main() -> int:
     print(f"goal       : {contract.goal}")
     print(f"surrogate  : {contract.metric.name} ({contract.metric.direction.value}), "
           f"min_delta={contract.min_delta}, complexity_price={contract.complexity_price}")
+    sd = stdev(dev0.seeds) if len(dev0.seeds) > 1 else 0.0
+    print(f"noise sd   : {sd:.4f}  ->  min_delta is {contract.min_delta / sd:.1f}x sd"
+          if sd else "noise sd   : unknown")
     print(f"baseline   : surrogate={fmt(dev0.value)}  goal={fmt(goal0.value)}\n")
 
     naive, _, _, naive_held = run(False, contract, dev0, goal0)

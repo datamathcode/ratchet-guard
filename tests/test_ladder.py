@@ -1,6 +1,4 @@
-import tempfile
 import unittest
-from pathlib import Path
 
 from ratchet_guard.ladder import adjudicate, transfer
 from ratchet_guard.model import Contract, Direction, Measurement, MetricSpec
@@ -18,7 +16,9 @@ def contract(**kw) -> Contract:
 
 
 def m(value, spread=0.01, loc=0, seeds=None):
-    s = seeds if seeds is not None else [value - spread, value, value + spread]
+    s = seeds if seeds is not None else [
+        value - spread, value - spread / 3, value + spread / 3, value + spread
+    ]
     return Measurement(value=value, seeds=tuple(s), loc_delta=loc)
 
 
@@ -32,10 +32,11 @@ class TestAdjudicate(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("includes zero", why)
 
-    def test_holdout_needs_three_seeds(self):
-        ok, why = adjudicate(contract(), m(0.90, seeds=[0.90]), m(0.80))
+    def test_holdout_needs_four_seeds(self):
+        """Three per arm bottoms out at p=0.10 on any rank test."""
+        ok, why = adjudicate(contract(), m(0.90, seeds=[0.89, 0.90, 0.91]), m(0.80))
         self.assertFalse(ok)
-        self.assertIn("3 are required", why)
+        self.assertIn("4 are required", why)
 
     def test_complexity_price_can_block_promotion(self):
         ok, why = adjudicate(contract(complexity_price=0.01), m(0.85, loc=20), m(0.80))

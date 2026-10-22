@@ -24,6 +24,9 @@ smarter. All of it makes the search's conclusions cheaper to falsify.
 | M9 | **Append-only hash-chained ledger**, written by the harness | an untracked TSV written by the agent |
 | M10 | **Promotion ladder** — screen → replicate → adjudicate → transfer | one tier, one number |
 | M11 | **Kill switches** — crash streak, holdout exhaustion, queue depth | `NEVER STOP` with no stop condition |
+| M12 | **Calibration tier** — a no-op control run that measures σ, pooled within-arm as the run proceeds | a `min_delta` someone guessed |
+| M13 | **Interleaved reference** — `reference_seeds` in the same session, compared paired | a baseline measured hours ago on a machine that has since warmed up |
+| M14 | **Overhead gate** — rejects a candidate that moved work outside the scored budget | the unscored half of the wall clock |
 
 ## Mapping
 
@@ -39,7 +42,7 @@ smarter. All of it makes the search's conclusions cheaper to falsify.
 | P8 goal drift | M1 (contract digest stamped per result) |
 | P9 n=1 | M4 |
 | P10 unknown noise floor | M4 |
-| P11 two-seed floor | M4 (`SEED_FLOOR = 3`) |
+| P11 two-seed floor | M4 (`SEED_FLOOR = 4`) |
 | P12 winner's curse | M3, M10 |
 | P13 step-count confound | M4 (replicate floor; assert equal counts) |
 | P14 variance inflation | M5 (gate 4) |
@@ -55,8 +58,14 @@ smarter. All of it makes the search's conclusions cheaper to falsify.
 | P24 unbounded autonomy | M11 |
 | P25 concurrent writers | runbook procedure |
 | P26 unverified transfer | M10 (transfer tier) |
+| P27 noise as progress | M4 (threshold), M12 (measured σ), M10 (replication), M3 (unbiased adjudicator) |
+| P28 unscored wall clock | M14, M1 (`wall_overhead_cap`) |
+| P29 single-draw baseline | M12, `baseline --runs 3` |
+| P30 no negative control | M12 |
+| P31 non-iid noise | M13 (paired), M12 (`drift` halt) |
+| P32 evaluator read access | `program.md`: interface, not source |
 
-## The three that carry the design
+## The five that carry the design
 
 ### M2 — the canary suite
 
@@ -116,6 +125,49 @@ within the repayment window, the debt expires and the run rolls back. So the
 loop can go backwards, but it has to *say so in advance* and it has to *pay it
 back*. That is a materially different thing from an unbounded step-back, and it
 recovers most of what P16 costs.
+
+### M12 — the calibration tier
+
+The threshold the ratchet compares against used to be a number a human guessed.
+M4 made it a measured number, but it was still measured once, at the start,
+from too few samples to be worth much.
+
+The calibration tier fixes the sample size without spending trials. Three things
+happen in sequence:
+
+1. **`control`** runs the incumbent unchanged, several times. Nothing can
+   improve, so everything it measures is noise. It reports σ and, importantly,
+   the *relative uncertainty of σ* — a number the operator needs in order to know
+   whether to trust the threshold they are about to set.
+2. **Every trial pools its within-arm variance** into the same estimate. This is
+   free: the seeds were already there. By trial 20 the floor rests on ~80 samples
+   instead of 8, and no experiment was paid for it.
+3. **`min_delta` below σ halts the run** rather than rejecting trials politely.
+   A threshold under one standard deviation cannot distinguish anything, so every
+   verdict it could produce is a coin flip that has been written down.
+
+The one rule that matters: pooling never crosses arms. Variance *between*
+configurations contains the effect under test, so a cross-arm pool would make the
+noise floor appear to shrink as the run succeeded — the instrument would report
+itself as becoming more precise exactly when it was being tuned to the incumbent.
+
+### M13 — the interleaved reference
+
+P31 says the noise is not iid, so every rank test in P11 is invalid, and the
+document's remedy is "detect drift and abort". That is a stop condition, not a
+measurement.
+
+Interleaving is the measurement. If the evaluator runs candidate and reference
+seeds alternately in one session and reports both, then drift is a *shared
+offset* between two arms that were measured at the same moments. A paired
+difference cancels it exactly, and the comparison becomes valid again without
+waiting for a quiet machine.
+
+This is why the protocol carries `reference_seeds`. An evaluator that reports it
+gets the paired interval automatically; one that does not falls back to the
+unpaired comparison against a baseline measured possibly hours earlier, which is
+the situation P31 is describing. Abort-on-drift stays as the fallback for
+evaluators that cannot interleave.
 
 ## What was deliberately not changed
 

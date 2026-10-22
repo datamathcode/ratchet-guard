@@ -5,7 +5,9 @@ from ratchet_guard.stats import (
     bootstrap_ci,
     diff_ci,
     mann_whitney,
+    paired_diff_ci,
     pooled_sd,
+    rel_sd_of_sd,
     required_seed_n,
 )
 
@@ -83,6 +85,39 @@ class TestRequiredSeedN(unittest.TestCase):
 
     def test_never_below_three(self):
         self.assertGreaterEqual(required_seed_n(0.01, 100.0), 3)
+
+
+class TestPairedDiff(unittest.TestCase):
+    def test_pairing_removes_a_shared_shift(self):
+        """Both arms shifted by the same amount; the paired difference sees
+        nothing, while an unpaired comparison would see a wide interval."""
+        ref = [0.80, 0.81, 0.79, 0.80]
+        cand = [0.90, 0.91, 0.89, 0.90]
+        lo, hi = paired_diff_ci(cand, ref)
+        self.assertAlmostEqual(lo, 0.10, places=6)
+        self.assertAlmostEqual(hi, 0.10, places=6)
+
+    def test_mismatched_lengths_are_refused(self):
+        with self.assertRaises(ValueError):
+            paired_diff_ci([1.0, 2.0], [1.0])
+
+    def test_noise_cancels_when_the_shift_is_common_to_both_arms(self):
+        cand = [0.90, 0.95, 0.85, 0.92]
+        ref = [0.80, 0.85, 0.75, 0.82]
+        lo, hi = paired_diff_ci(cand, ref)
+        self.assertAlmostEqual(lo, 0.10, places=6)
+        self.assertAlmostEqual(hi, 0.10, places=6)
+
+
+class TestRelSdOfSd(unittest.TestCase):
+    def test_three_samples_give_a_fifty_percent_estimate(self):
+        self.assertAlmostEqual(rel_sd_of_sd(3), 0.5, places=6)
+
+    def test_more_samples_are_better(self):
+        self.assertLess(rel_sd_of_sd(30), rel_sd_of_sd(3))
+
+    def test_impossible_sample_size(self):
+        self.assertEqual(rel_sd_of_sd(1), float("inf"))
 
 
 if __name__ == "__main__":

@@ -125,6 +125,35 @@ trials, a fixed validation set stops being a held-out sample and becomes a
 training set with extra steps. This is not a bug in any line of code. It is a
 property of the search.
 
+### The correction: for *this* repo, noise beats divergence
+
+The argument above is the one this project was built on, and it is too strong in
+one respect that matters. `val_bpb` is not a proxy for a hidden quantity. It
+**is** the stated objective, and the loop is correct to optimise it. Divergence
+between `M` and `G` for the shipped repo is limited to the difference between
+"lowest `val_bpb` on one shard in five minutes" and "a better model", which is
+small.
+
+So the dominant failure in the shipped repo is not divergence. It is **P27**:
+zero true improvement, iid noise, and a rule that keeps every new minimum. The
+arithmetic is unforgiving and it does not need a single dishonest proposal:
+
+- over 100 trials with no real effect, the running minimum falls by ~2.4σ and
+  the log records ~5.2 accepted commits that are pure noise;
+- once the incumbent sits 2.4σ below the truth, a genuine 1σ improvement is
+  accepted with probability 8%.
+
+Nobody chooses that detection threshold. It is a consequence of taking a running
+minimum on a noisy instrument, and it rises as the run proceeds. The branch ends
+up "better" than it started by exactly as much as the noise allows, and it
+becomes progressively less able to notice real gains.
+
+This does not retract the divergence argument; it orders it. **Noise binds
+first, divergence binds on any port.** A guard that only adjudicates the goal
+still accepts noise as progress, so the statistics have to come before the
+philosophy. That is why gate 2 and the calibration tier exist at all, and why
+`docs/PITFALLS.md` now leads with P27 rather than P1.
+
 ## Four more structural limits
 
 **Saturation stops the loop, not the work.** Once `M` hits a ceiling the
@@ -172,10 +201,15 @@ cheap, stable evaluator.
 **Settled:** a monotone accept rule on a proxy metric is structurally blind to
 the proxy-goal residual, and monotonicity entrenches whatever it finds there.
 
+**Settled:** a monotone accept rule on a *noisy* metric manufactures progress
+with no dishonest proposal at all — ~5.2 false accepts per 100 trials and ~2.4σ
+of terminal drift. For the shipped repo this binds before divergence does.
+
 **Provisional:** the residual is small enough in practice that most published
 runs are net-positive. The mechanism is certain; the magnitude depends on how
 gameable the specific metric is, and `val_bpb` on a fresh validation shard is
-less gameable than most.
+less gameable than most. The same caveat does *not* apply to the noise term,
+which is measurable and should be measured.
 
 **Open:** whether adding guards and adjudication recovers more than it costs in
 trial throughput. Every gate rejects some true positives. The bet here is that
